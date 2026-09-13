@@ -1,0 +1,31 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+  --font-sans: var(--font-body);
+}
+
+:root {
+  color-scheme: light;
+  --background: #f4f7fa;
+  --foreground: #183040;
+  --border: #dce5ea;
+  --ring: #16834c;
+  --font-body: Arial, Helvetica, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html { background: var(--background); }
+body { margin: 0; background: var(--background); color: var(--foreground); font-family: var(--font-body); }
+button, input, textarea { font: inherit; }
+.field { width: 100%; border: 1px solid #d8e3e6; border-radius: 8px; background: white; padding: 12px 14px; color: #31505b; font-size: 14px; outline: none; transition: border-color .15s, box-shadow .15s; }
+.field:focus { border-color: #16834c; box-shadow: 0 0 0 3px rgba(22,131,76,.12); }
+.field::placeholder { color: #9aacb2; }
+.score-field { width: 68px; border: 1px solid #d8e3e6; border-radius: 8px; background: white; padding: 10px; color: #16834c; text-align: center; font-weight: 700; outline: none; }
+.score-field:focus { border-color: #16834c; box-shadow: 0 0 0 3px rgba(22,131,76,.12); }
+@media (max-width: 640px) { .score-field { width: 60px; } }
