@@ -1,7 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, ArrowRight, Check, CheckCircle2, Menu, Search, X, Award, Loader2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, ArrowRight, Check, CheckCircle2, Menu, Search, X, Award, Loader2, Users, ChevronRight, RefreshCw } from 'lucide-react'
 
 const UGI_LOGO = 'https://hebbkx1anhila5yf.public.blob.vercel-storage.com/image-AeYJZHsxR9T5kbLeksrbKY5kp8f7Ux.png'
 const SIH_LOGO = 'https://hebbkx1anhila5yf.public.blob.vercel-storage.com/image-Idsasyw4B47NFcq9s6h1KnM9ycbyRr.png'
@@ -51,6 +51,8 @@ const criteria = [
   ['Team Collaboration', 10, 'Participation and coordination among members'],
 ] as const
 
+const CRITERIA_MAX_TOTAL = 100
+
 type Evaluation = {
   teamCode: string
   teamName: string
@@ -59,6 +61,8 @@ type Evaluation = {
   scores: number[]
   remarks: string
   problemNumber: string
+  createdAt?: string
+  dbId?: string | number
 }
 
 type ViewKey = 'evaluation' | 'history' | 'teams'
@@ -112,35 +116,75 @@ export default function Page() {
   const [menu, setMenu] = useState(false)
   const [evaluations, setEvaluations] = useState<Evaluation[]>(() => loadLS<Evaluation[]>(LS_EVALS, []))
   const [teamQuery, setTeamQuery] = useState('')
+  const [selectedTeamForDetail, setSelectedTeamForDetail] = useState<Team | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const lastFetchedAtRef = useRef<number>(0)
+  const teamsFetchedFromDBRef = useRef(false)
+  const evalsFetchedFromDBRef = useRef(false)
 
   useEffect(() => {
-    saveLS(LS_TEAMS, teams)
+    if (teamsFetchedFromDBRef.current) {
+      saveLS(LS_TEAMS, teams)
+    }
   }, [teams])
 
   useEffect(() => {
-    saveLS(LS_EVALS, evaluations)
+    if (evalsFetchedFromDBRef.current) {
+      saveLS(LS_EVALS, evaluations)
+    }
   }, [evaluations])
 
-  const fetchTeams = useCallback(async () => {
+  function dedupeEvals(list: Evaluation[]): Evaluation[] {
+    const seen = new Map<string, Evaluation>()
+    for (const e of list) {
+      const key =
+        e.dbId !== undefined && e.dbId !== null && String(e.dbId).length > 0
+          ? `id:${String(e.dbId)}`
+          : `${e.teamCode}::${e.evaluator}::${e.createdAt ?? ''}::${e.scores.join(',')}`
+      const prev = seen.get(key)
+      if (!prev) {
+        seen.set(key, e)
+      } else if ((prev.createdAt ?? '') < (e.createdAt ?? '')) {
+        seen.set(key, e)
+      }
+    }
+    return Array.from(seen.values())
+  }
+
+  const fetchTeams = useCallback(async (opts?: { silent?: boolean }) => {
     try {
       const res = await fetch('/api/teams', { cache: 'no-store' })
       if (res.ok) {
         const data = (await res.json()) as Team[]
-        if (Array.isArray(data) && data.length > 0) {
-          setTeams(data)
-          setSelectedTeam(data[0])
+        if (Array.isArray(data)) {
+          const safe = data.length > 0 ? data : FALLBACK_TEAMS
+          setTeams(safe)
+          if (safe.length > 0) {
+            setSelectedTeam((prev) => {
+              const stillExists = safe.find((t) => t.code === prev?.code)
+              return stillExists ?? safe[0]
+            })
+          }
+          teamsFetchedFromDBRef.current = true
+          return
         }
       }
+      if (!opts?.silent) {
+        console.warn('fetch teams returned non-array, using localStorage/fallback')
+      }
     } catch (e) {
-      console.warn('fetch teams failed, using localStorage/fallback:', e)
+      if (!opts?.silent) {
+        console.warn('fetch teams failed, using localStorage/fallback:', e)
+      }
     }
   }, [])
 
-  const fetchEvaluations = useCallback(async () => {
+  const fetchEvaluations = useCallback(async (opts?: { silent?: boolean }) => {
     try {
       const res = await fetch('/api/evaluations', { cache: 'no-store' })
       if (res.ok) {
         const rows = (await res.json()) as Array<{
+          id?: string | number
           team_code: string
           team_name: string
           evaluator: string
@@ -152,42 +196,129 @@ export default function Page() {
           impact_scalability: number
           presentation_demo: number
           team_collaboration: number
-          remarks?: string
+          remarks?: string | null
+          created_at?: string
         }>
-        if (Array.isArray(rows) && rows.length > 0) {
+        if (Array.isArray(rows)) {
           const mapped: Evaluation[] = rows.map((r) => ({
             teamCode: r.team_code,
             teamName: r.team_name,
             evaluator: r.evaluator,
             role: r.role,
             problemNumber: r.problem_number,
-            remarks: r.remarks || '',
+            remarks: r.remarks == null ? '' : String(r.remarks),
             scores: [
-              r.innovation,
-              r.problem_understanding,
-              r.technical_feasibility,
-              r.impact_scalability,
-              r.presentation_demo,
-              r.team_collaboration,
+              Number(r.innovation) || 0,
+              Number(r.problem_understanding) || 0,
+              Number(r.technical_feasibility) || 0,
+              Number(r.impact_scalability) || 0,
+              Number(r.presentation_demo) || 0,
+              Number(r.team_collaboration) || 0,
             ],
+            createdAt: r.created_at,
+            dbId: r.id,
           }))
-          setEvaluations(mapped)
+          const deduped = dedupeEvals(mapped).sort((a, b) => {
+            const ta = a.createdAt ?? ''
+            const tb = b.createdAt ?? ''
+            if (ta > tb) return -1
+            if (ta < tb) return 1
+            return 0
+          })
+          setEvaluations(deduped)
+          evalsFetchedFromDBRef.current = true
+          return
         }
       }
+      if (!opts?.silent) {
+        console.warn('fetch evaluations returned non-array, using localStorage')
+      }
     } catch (e) {
-      console.warn('fetch evaluations failed, using localStorage:', e)
+      if (!opts?.silent) {
+        console.warn('fetch evaluations failed, using localStorage:', e)
+      }
     }
   }, [])
 
+  const forceRefresh = useCallback(async () => {
+    setRefreshing(true)
+    try {
+      await Promise.all([fetchTeams({ silent: true }), fetchEvaluations({ silent: true })])
+      lastFetchedAtRef.current = Date.now()
+    } finally {
+      setRefreshing(false)
+    }
+  }, [fetchTeams, fetchEvaluations])
+
   useEffect(() => {
+    let mounted = true
+    let pollTimer: ReturnType<typeof setInterval> | null = null
+
     ;(async () => {
       setLoading(true)
       try {
         await Promise.all([fetchTeams(), fetchEvaluations()])
+        lastFetchedAtRef.current = Date.now()
       } catch {}
-      setLoading(false)
+      if (mounted) setLoading(false)
     })()
-  }, [fetchTeams, fetchEvaluations])
+
+    pollTimer = setInterval(() => {
+      void forceRefresh()
+    }, 15_000)
+
+    let realtimeUnsub: (() => void) | null = null
+    if (typeof window !== 'undefined') {
+      import('@/lib/supabase').then(({ supabase }) => {
+        if (!mounted) return
+        try {
+          const c1 = supabase
+            .channel('sih_evals_realtime')
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'evaluations' },
+              () => {
+                void fetchEvaluations({ silent: true })
+              },
+            )
+            .subscribe()
+          const c2 = supabase
+            .channel('sih_teams_realtime')
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'teams' },
+              () => {
+                void fetchTeams({ silent: true })
+              },
+            )
+            .subscribe()
+          realtimeUnsub = () => {
+            try {
+              supabase.removeChannel(c1)
+              supabase.removeChannel(c2)
+            } catch {}
+          }
+        } catch {
+          /* ignore realtime setup errors; polling is active */
+        }
+      }).catch(() => {})
+    }
+
+    const onFocus = () => {
+      const now = Date.now()
+      if (now - lastFetchedAtRef.current > 3000) {
+        void forceRefresh()
+      }
+    }
+    window.addEventListener('focus', onFocus)
+
+    return () => {
+      mounted = false
+      if (pollTimer) clearInterval(pollTimer)
+      window.removeEventListener('focus', onFocus)
+      if (realtimeUnsub) realtimeUnsub()
+    }
+  }, [fetchTeams, fetchEvaluations, forceRefresh])
 
   useEffect(() => {
     const onPop = () => {
@@ -209,6 +340,93 @@ export default function Page() {
   const teamResults = evaluations.filter((item) =>
     `${item.teamName} ${item.teamCode}`.toLowerCase().includes(teamQuery.toLowerCase()),
   )
+
+  type TeamEval = Evaluation & { totalObtained: number }
+
+  type TeamStat = {
+    team: Team
+    evals: TeamEval[]
+    memberCount: number
+    totalMaxMarks: number
+    totalObtainedMarks: number
+    average: number
+  }
+
+  const teamStats = useMemo<TeamStat[]>(() => {
+    // Normalise team name for grouping (trim + lowercase)
+    const normName = (n: string) => n.trim().toLowerCase()
+
+    // Group ALL evaluations by normalised team name (ignores different team codes for the same team)
+    const byName = new Map<string, TeamEval[]>()
+    for (const ev of evaluations) {
+      const key = normName(ev.teamName)
+      const totalObtained = ev.scores.reduce((a, b) => a + b, 0)
+      const rec: TeamEval = { ...ev, totalObtained }
+      const arr = byName.get(key)
+      if (arr) arr.push(rec)
+      else byName.set(key, [rec])
+    }
+
+    // Build a lookup from normalised name → best registered team metadata
+    // Prefer teams table entries that have a proper SIH-UIM-2026-XXXX code
+    const teamMetaByName = new Map<string, Team>()
+    for (const t of teams) {
+      const key = normName(t.name)
+      const existing = teamMetaByName.get(key)
+      // Prefer the entry whose code looks like the "real" event code (SIH-UIM-2026-*)
+      if (!existing || t.code.startsWith('SIH-UIM-2026-')) {
+        teamMetaByName.set(key, t)
+      }
+    }
+
+    // Also collect team names that appear only in evaluations (not in teams table)
+    const allNames = new Set<string>([
+      ...Array.from(byName.keys()),
+      ...teams.map((t) => normName(t.name)),
+    ])
+
+    const stats: TeamStat[] = Array.from(allNames).map((nameKey) => {
+      const evals = byName.get(nameKey) ?? []
+      // Pick best code from evaluations: prefer SIH-UIM-2026-* over SIH26-*
+      const bestCode = evals.reduce<string | null>((best, ev) => {
+        if (!best) return ev.teamCode
+        if (ev.teamCode.startsWith('SIH-UIM-2026-')) return ev.teamCode
+        return best
+      }, null)
+
+      const registeredMeta = teamMetaByName.get(nameKey)
+      const firstEval = evals[0]
+      const team: Team = registeredMeta
+        ? {
+            ...registeredMeta,
+            // Use the best code found (SIH-UIM-2026-* preferred)
+            code: bestCode ?? registeredMeta.code,
+          }
+        : {
+            code: bestCode ?? nameKey,
+            name: firstEval?.teamName ?? nameKey,
+            leader: '—',
+            title: '—',
+            domain: '—',
+            status: 'Pending',
+          }
+
+      const memberCount = evals.length
+      const totalObtainedMarks = evals.reduce((s, e) => s + e.totalObtained, 0)
+      const totalMaxMarks = memberCount * CRITERIA_MAX_TOTAL
+      const average = memberCount > 0 ? totalObtainedMarks / memberCount : 0
+      return { team, evals, memberCount, totalMaxMarks, totalObtainedMarks, average }
+    })
+
+    // Sort: evaluated teams first by average desc, then unevaluated teams alphabetically
+    stats.sort((a, b) => {
+      if (a.memberCount === 0 && b.memberCount === 0) return a.team.name.localeCompare(b.team.name)
+      if (a.memberCount === 0) return 1
+      if (b.memberCount === 0) return -1
+      return b.average - a.average
+    })
+    return stats
+  }, [teams, evaluations])
 
   const go = (next: ViewKey) => {
     setView(next)
@@ -273,7 +491,29 @@ export default function Page() {
         }
         throw new Error(msg)
       }
-      setEvaluations((current) => [payload, ...current])
+      const savedRow: any = await res.json().catch(() => payload)
+      const savedEval: Evaluation = {
+        teamCode: savedRow?.team_code ?? payload.teamCode,
+        teamName: savedRow?.team_name ?? payload.teamName,
+        evaluator: savedRow?.evaluator ?? payload.evaluator,
+        role: savedRow?.role ?? payload.role,
+        problemNumber: savedRow?.problem_number ?? payload.problemNumber,
+        remarks: savedRow?.remarks == null ? payload.remarks : String(savedRow.remarks),
+        scores: [
+          Number(savedRow?.innovation ?? payload.scores[0]),
+          Number(savedRow?.problem_understanding ?? payload.scores[1]),
+          Number(savedRow?.technical_feasibility ?? payload.scores[2]),
+          Number(savedRow?.impact_scalability ?? payload.scores[3]),
+          Number(savedRow?.presentation_demo ?? payload.scores[4]),
+          Number(savedRow?.team_collaboration ?? payload.scores[5]),
+        ],
+        createdAt: savedRow?.created_at,
+        dbId: savedRow?.id,
+      }
+      setEvaluations((current) => dedupeEvals([savedEval, ...current]))
+      setTimeout(() => {
+        void fetchEvaluations({ silent: true })
+      }, 300)
       setSubmitted(true)
     } catch (e: any) {
       console.error('submit failed:', e)
@@ -328,6 +568,11 @@ export default function Page() {
                 setQuery={setTeamQuery}
                 evaluations={teamResults}
                 go={go}
+                teamStats={teamStats}
+                onSelectTeam={setSelectedTeamForDetail}
+                onRefresh={forceRefresh}
+                refreshing={refreshing}
+                totalEvaluationsCount={evaluations.length}
               />
             ) : (
               <EvaluationView
@@ -362,6 +607,14 @@ export default function Page() {
           </div>
         </section>
       </div>
+
+      {selectedTeamForDetail && (
+        <TeamDetailModal
+          team={selectedTeamForDetail}
+          teamStats={teamStats}
+          onClose={() => setSelectedTeamForDetail(null)}
+        />
+      )}
     </main>
   )
 }
@@ -473,18 +726,37 @@ function ScoreCard({ item }: { item: Evaluation }) {
   )
 }
 
+type TeamStatType = {
+  team: Team
+  evals: Array<Evaluation & { totalObtained: number }>
+  memberCount: number
+  totalMaxMarks: number
+  totalObtainedMarks: number
+  average: number
+}
+
 function TeamsView({
   teams: teamList,
   query,
   setQuery,
   evaluations,
   go,
+  teamStats,
+  onSelectTeam,
+  onRefresh,
+  refreshing,
+  totalEvaluationsCount,
 }: {
   teams: Team[]
   query: string
   setQuery: (value: string) => void
   evaluations: Evaluation[]
   go: (view: ViewKey) => void
+  teamStats: TeamStatType[]
+  onSelectTeam: (team: Team) => void
+  onRefresh?: () => void
+  refreshing?: boolean
+  totalEvaluationsCount?: number
 }) {
   const grouped = useMemo(
     () =>
@@ -501,39 +773,472 @@ function TeamsView({
         `${items[0].teamName} ${items[0].teamCode}`.toLowerCase().includes(query.trim().toLowerCase()),
       )
     : []
+
+  const evaluatorsSeen = useMemo(() => {
+    const uniq = new Set<string>()
+    for (const s of teamStats) for (const e of s.evals) uniq.add(`${s.team.code}::${e.evaluator}`)
+    return uniq.size
+  }, [teamStats])
+
   return (
     <>
-      <PageIntro
-        eyebrow="Team result lookup"
-        title="See how your team performed"
-        subtitle="Enter your team name to view only your team's scores and suggestions."
-      />
-      <div className="mb-5 relative">
-        <Search className="absolute left-3 top-3.5 text-[#8da1a8]" size={17} />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Enter your team name"
-          className="field pl-10"
-        />
-        {query && (
-          <button onClick={() => setQuery('')} className="absolute right-3 top-3 text-[#8da1a8]">
-            <X size={17} />
+      <div className="mb-8 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+        <div>
+          <div className="mb-2 flex items-center gap-2">
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-[#e16c25]">Live leaderboard</p>
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full border border-[#bfe3ce] bg-[#eaf7f0] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-[#16834c]"
+              title="Auto-updates via polling + Supabase realtime"
+            >
+              <span className="relative flex size-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#16834c]/50 opacity-75"></span>
+                <span className="relative inline-flex size-2 rounded-full bg-[#16834c]"></span>
+              </span>
+              Live
+            </span>
+          </div>
+          <h1 className="text-2xl font-bold tracking-tight text-[#193d4d] sm:text-3xl">Teams Leaderboard</h1>
+          <p className="mt-2 text-sm text-[#71858d]">
+            All teams with their average score. Click any team to see teacher-wise details.
+          </p>
+          <p className="mt-1 text-[11px] text-[#8a9da4]">
+            <Users size={11} className="-mt-0.5 mr-1 inline" />
+            {teamStats.length} teams · {evaluatorsSeen} team × evaluator submissions · {totalEvaluationsCount ?? 0}{' '}
+            total evaluations stored
+          </p>
+        </div>
+        {onRefresh && (
+          <button
+            onClick={onRefresh}
+            disabled={refreshing}
+            className="inline-flex items-center gap-2 self-start rounded-lg border border-[#cfe3d7] bg-[#f2faf6] px-3.5 py-2 text-sm font-bold text-[#16834c] disabled:opacity-60 hover:bg-[#e7f5ed]"
+          >
+            <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
+            {refreshing ? 'Syncing with DB…' : 'Refresh from DB'}
           </button>
         )}
       </div>
-      {visible.length === 0 ? (
-        <Empty
-          text={query.trim() ? 'No team results found for that search.' : 'Enter your team name to see your results.'}
-        />
-      ) : (
-        <div className="flex flex-col gap-4">
-          {visible.map((items) => (
-            <TeamResultCard items={items} teamList={teamList} key={items[0].teamCode} />
-          ))}
+      <TeamsLeaderboard teamStats={teamStats} onSelectTeam={onSelectTeam} />
+
+      <div className="mt-10">
+        <p className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-[#e16c25]">Team result lookup</p>
+        <h3 className="text-lg font-bold text-[#193d4d]">See how your team performed</h3>
+        <p className="mt-1 mb-5 text-sm text-[#71858d]">
+          Enter your team name to view only your team's scores and suggestions.
+        </p>
+        <div className="mb-5 relative">
+          <Search className="absolute left-3 top-3.5 text-[#8da1a8]" size={17} />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Enter your team name"
+            className="field pl-10"
+          />
+          {query && (
+            <button onClick={() => setQuery('')} className="absolute right-3 top-3 text-[#8da1a8]">
+              <X size={17} />
+            </button>
+          )}
         </div>
-      )}
+        {visible.length === 0 ? (
+          <Empty
+            text={query.trim() ? 'No team results found for that search.' : 'Enter your team name to see your results.'}
+          />
+        ) : (
+          <div className="flex flex-col gap-4">
+            {visible.map((items) => (
+              <TeamResultCard items={items} teamList={teamList} key={items[0].teamCode} />
+            ))}
+          </div>
+        )}
+      </div>
     </>
+  )
+}
+
+function TeamsLeaderboard({
+  teamStats,
+  onSelectTeam,
+}: {
+  teamStats: TeamStatType[]
+  onSelectTeam: (team: Team) => void
+}) {
+  if (!teamStats || teamStats.length === 0) {
+    return (
+      <Card>
+        <div className="p-12 text-center text-sm text-[#77909a]">No data available</div>
+      </Card>
+    )
+  }
+
+  return (
+    <>
+      <div className="hidden md:block">
+        <TeamsDesktopTable teamStats={teamStats} onSelectTeam={onSelectTeam} />
+      </div>
+      <div className="md:hidden">
+        <TeamsMobileCards teamStats={teamStats} onSelectTeam={onSelectTeam} />
+      </div>
+    </>
+  )
+}
+
+function TeamsDesktopTable({
+  teamStats,
+  onSelectTeam,
+}: {
+  teamStats: TeamStatType[]
+  onSelectTeam: (team: Team) => void
+}) {
+  return (
+    <Card>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-[#e4ecee] bg-[#f7fafb] text-left text-xs font-bold uppercase tracking-wider text-[#73878e]">
+              <th className="px-6 py-4">Rank</th>
+              <th className="px-6 py-4">Team Name</th>
+              <th className="px-6 py-4">Leader Name</th>
+              <th className="px-6 py-4 text-right">Evaluators</th>
+              <th className="px-6 py-4 text-right">Marks</th>
+              <th className="px-6 py-4 text-right">Average</th>
+              <th className="px-6 py-4" aria-hidden />
+            </tr>
+          </thead>
+          <tbody>
+            {teamStats.map((stat, idx) => (
+              <tr
+                key={stat.team.code}
+                onClick={() => onSelectTeam(stat.team)}
+                className="group cursor-pointer border-b border-[#eef3f4] last:border-b-0 transition-colors hover:bg-[#f3faf6]"
+              >
+                <td className="px-6 py-4 align-middle">
+                  <RankBadge index={idx} average={stat.average} />
+                </td>
+                <td className="px-6 py-4 align-middle">
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#6c9481]">{stat.team.code}</p>
+                    <p className="mt-0.5 font-bold text-[#244958]">{stat.team.name}</p>
+                  </div>
+                </td>
+                <td className="px-6 py-4 align-middle">
+                  <span className="inline-flex items-center gap-2 font-semibold text-[#36535e]">
+                    <Award size={14} className="text-[#c58633]" /> {stat.team.leader}
+                  </span>
+                </td>
+                <td className="px-6 py-4 align-middle text-right">
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-[#eef3f5] px-3 py-1 text-xs font-bold text-[#49606a]">
+                    <Users size={12} /> {stat.memberCount}
+                  </span>
+                </td>
+                <td className="px-6 py-4 align-middle text-right font-bold text-[#36535e]">
+                  {stat.totalObtainedMarks}
+                  <span className="text-xs font-medium text-[#8399a0]"> / {stat.totalMaxMarks}</span>
+                </td>
+                <td className="px-6 py-4 align-middle text-right">
+                  <AverageValue value={stat.average} />
+                </td>
+                <td className="px-4 py-4 align-middle text-right text-[#16834c] opacity-0 transition-opacity group-hover:opacity-100">
+                  <ChevronRight size={18} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  )
+}
+
+function TeamsMobileCards({
+  teamStats,
+  onSelectTeam,
+}: {
+  teamStats: TeamStatType[]
+  onSelectTeam: (team: Team) => void
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      {teamStats.map((stat, idx) => (
+        <button
+          key={stat.team.code}
+          onClick={() => onSelectTeam(stat.team)}
+          className="rounded-xl border border-[#dce5e8] bg-white p-4 text-left shadow-[0_4px_20px_rgba(32,71,84,0.04)] active:bg-[#f3faf6]"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <RankBadge index={idx} average={stat.average} small />
+                <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#6c9481]">
+                  {stat.team.code}
+                </span>
+              </div>
+              <p className="mt-1.5 truncate text-base font-bold text-[#244958]">{stat.team.name}</p>
+              <p className="mt-1 truncate text-xs font-semibold text-[#5c727b]">
+                Leader: <span className="text-[#8a5d1c]">{stat.team.leader}</span>
+              </p>
+            </div>
+            <div className="text-right">
+              <AverageValue value={stat.average} small />
+            </div>
+          </div>
+          <div className="mt-3 flex items-center justify-between border-t border-[#eef3f4] pt-3 text-xs">
+            <span className="inline-flex items-center gap-1.5 font-semibold text-[#49606a]">
+              <Users size={12} /> {stat.memberCount} evaluator{stat.memberCount === 1 ? '' : 's'}
+            </span>
+            <span className="font-bold text-[#36535e]">
+              {stat.totalObtainedMarks}
+              <span className="font-medium text-[#8399a0]"> / {stat.totalMaxMarks}</span>
+            </span>
+          </div>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function RankBadge({ index, average, small = false }: { index: number; average: number; small?: boolean }) {
+  const isTop = index < 3 && average > 0
+  const base = small ? 'size-5 text-[10px]' : 'size-7 text-xs'
+  const color =
+    index === 0 && average > 0
+      ? 'bg-[#f5d27b] text-[#6b4e05]'
+      : index === 1 && average > 0
+        ? 'bg-[#dce4ea] text-[#3a4a55]'
+        : index === 2 && average > 0
+          ? 'bg-[#e8c09a] text-[#6b3a14]'
+          : 'bg-[#eef3f5] text-[#5d727b]'
+  return (
+    <span
+      className={`inline-flex ${base} items-center justify-center rounded-full font-bold ${isTop ? color : 'bg-[#eef3f5] text-[#5d727b]'}`}
+    >
+      {index + 1}
+    </span>
+  )
+}
+
+function AverageValue({ value, small = false }: { value: number; small?: boolean }) {
+  const display = Number.isFinite(value) ? value.toFixed(2) : '0.00'
+  const tone =
+    value >= 80 ? 'text-[#16834c]' : value >= 60 ? 'text-[#216595]' : value >= 40 ? 'text-[#a76a17]' : 'text-[#9a3b2a]'
+  return (
+    <div className={`font-extrabold ${small ? 'text-lg' : 'text-xl'} ${tone}`}>
+      {display}
+      <span className={`font-medium ${small ? 'text-[10px]' : 'text-xs'} text-[#8399a0]`}></span>
+    </div>
+  )
+}
+
+function TeamDetailModal({
+  team,
+  teamStats,
+  onClose,
+}: {
+  team: Team
+  teamStats: TeamStatType[]
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    window.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [onClose])
+
+  const stat = teamStats.find((s) => s.team.code === team.code)
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center sm:items-center bg-[#0c222c]/50 backdrop-blur-sm p-0 sm:p-4"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-3xl max-h-[92vh] overflow-hidden rounded-t-2xl sm:rounded-2xl border border-[#dce5e8] bg-white shadow-2xl flex flex-col"
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-[#e4ecee] px-5 py-4 sm:px-6 sm:py-5">
+          <div className="min-w-0">
+            <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#6c9481]">{team.code}</p>
+            <h2 className="mt-1 text-xl font-bold text-[#244958] sm:text-2xl">{team.name}</h2>
+            <p className="mt-1 text-xs sm:text-sm text-[#77909a]">
+              <Award size={12} className="mr-1 inline" /> Leader: {team.leader}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded-lg p-2 text-[#70868e] hover:bg-[#eef3f5]"
+          >
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="overflow-y-auto px-5 py-5 sm:px-6 sm:py-6">
+          {!stat || stat.evals.length === 0 ? (
+            <Empty text="No data available" />
+          ) : (
+            <>
+              <div className="mb-6 grid gap-3 sm:grid-cols-3">
+                <StatBox label="Total Marks" value={`${stat.totalMaxMarks}`} tone="neutral" />
+                <StatBox label="Marks Obtained" value={`${stat.totalObtainedMarks}`} tone="primary" />
+                <StatBox
+                  label="Average"
+                  value={Number.isFinite(stat.average) ? stat.average.toFixed(2) : '0.00'}
+                  tone="accent"
+                />
+              </div>
+
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="text-sm font-bold uppercase tracking-wider text-[#73878e]">Teacher / Evaluator Breakdown</h3>
+                <span className="text-[11px] font-semibold text-[#5d747d]">
+                  ({stat.evals.length} member{stat.evals.length === 1 ? '' : 's'})
+                </span>
+              </div>
+
+              <div className="hidden sm:block">
+                <div className="overflow-hidden rounded-xl border border-[#dce5e8]">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-[#f7fafb] text-left text-xs font-bold uppercase tracking-wider text-[#73878e]">
+                        <th className="px-4 py-3">Teacher / Evaluator</th>
+                        <th className="px-4 py-3 text-right">Total Marks</th>
+                        <th className="px-4 py-3 text-right">Marks Obtained</th>
+                        <th className="px-4 py-3 text-right">Score %</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {stat.evals.map((ev, i) => {
+                        const pct = CRITERIA_MAX_TOTAL > 0 ? (ev.totalObtained / CRITERIA_MAX_TOTAL) * 100 : 0
+                        return (
+                          <tr
+                            key={`${ev.evaluator}-${i}`}
+                            className="border-t border-[#eef3f4] last:border-b-0"
+                          >
+                            <td className="px-4 py-3 align-middle">
+                              <p className="font-semibold text-[#244958]">{ev.evaluator}</p>
+                              <p className="text-xs text-[#8a9ba2]">{ev.role}</p>
+                            </td>
+                            <td className="px-4 py-3 align-middle text-right font-bold text-[#546c74]">
+                              {CRITERIA_MAX_TOTAL}
+                            </td>
+                            <td className="px-4 py-3 align-middle text-right font-bold text-[#244958]">
+                              {ev.totalObtained}
+                            </td>
+                            <td className="px-4 py-3 align-middle text-right">
+                              <PercentageBadge value={pct} />
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                    <tfoot>
+                      <tr className="border-t-2 border-[#d5e4da] bg-[#f3faf7]">
+                        <td className="px-4 py-3 font-bold text-[#244958]">Team Totals</td>
+                        <td className="px-4 py-3 text-right font-extrabold text-[#546c74]">{stat.totalMaxMarks}</td>
+                        <td className="px-4 py-3 text-right font-extrabold text-[#16834c]">{stat.totalObtainedMarks}</td>
+                        <td className="px-4 py-3 text-right">
+                          <span className="text-lg font-extrabold text-[#16834c]">
+                            Avg {Number.isFinite(stat.average) ? stat.average.toFixed(2) : '0.00'}
+                          </span>
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+
+              <div className="sm:hidden flex flex-col gap-3">
+                {stat.evals.map((ev, i) => {
+                  const pct = CRITERIA_MAX_TOTAL > 0 ? (ev.totalObtained / CRITERIA_MAX_TOTAL) * 100 : 0
+                  return (
+                    <div key={`${ev.evaluator}-${i}`} className="rounded-xl border border-[#e1e9eb] p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-bold text-[#244958]">{ev.evaluator}</p>
+                          <p className="text-xs text-[#8a9ba2]">{ev.role}</p>
+                        </div>
+                        <PercentageBadge value={pct} />
+                      </div>
+                      <div className="mt-3 flex items-center justify-between border-t border-[#edf1f2] pt-3 text-sm">
+                        <span className="text-[#70868e]">
+                          Obtained: <b className="text-[#244958]">{ev.totalObtained}</b>
+                        </span>
+                        <span className="text-[#70868e]">
+                          Total: <b className="text-[#546c74]">{CRITERIA_MAX_TOTAL}</b>
+                        </span>
+                      </div>
+                    </div>
+                  )
+                })}
+                <div className="rounded-xl border-2 border-[#d5e4da] bg-[#f3faf7] p-4">
+                  <p className="text-xs font-bold uppercase tracking-wider text-[#16834c]">Team Summary</p>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
+                    <div>
+                      <p className="text-[11px] text-[#70868e]">Total Marks</p>
+                      <p className="font-bold text-[#546c74]">{stat.totalMaxMarks}</p>
+                    </div>
+                    <div>
+                      <p className="text-[11px] text-[#70868e]">Obtained</p>
+                      <p className="font-bold text-[#244958]">{stat.totalObtainedMarks}</p>
+                    </div>
+                    <div className="col-span-2 border-t border-[#dce5ea] pt-2">
+                      <p className="text-[11px] text-[#70868e]">Average</p>
+                      <p className="text-xl font-extrabold text-[#16834c]">
+                        {Number.isFinite(stat.average) ? stat.average.toFixed(2) : '0.00'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function StatBox({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone: 'primary' | 'accent' | 'neutral'
+}) {
+  const styles =
+    tone === 'primary'
+      ? 'border-[#cfe7d9] bg-[#f2faf6] text-[#16834c]'
+      : tone === 'accent'
+        ? 'border-[#e4ddd0] bg-[#faf6ef] text-[#9a6513]'
+        : 'border-[#dce5ea] bg-[#f7fafb] text-[#36535e]'
+  return (
+    <div className={`rounded-xl border p-4 ${styles}`}>
+      <p className="text-[11px] font-bold uppercase tracking-wider opacity-80">{label}</p>
+      <p className="mt-1 text-2xl font-extrabold">{value}</p>
+    </div>
+  )
+}
+
+function PercentageBadge({ value }: { value: number }) {
+  const safe = Number.isFinite(value) ? value : 0
+  const tone =
+    safe >= 80
+      ? 'bg-[#dff4e8] text-[#16834c]'
+      : safe >= 60
+        ? 'bg-[#dbebf7] text-[#1c5f8f]'
+        : safe >= 40
+          ? 'bg-[#f6ebd8] text-[#8c5e16]'
+          : 'bg-[#f4ded9] text-[#8a2d1d]'
+  return (
+    <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-extrabold ${tone}`}>
+      {safe.toFixed(2)}%
+    </span>
   )
 }
 
